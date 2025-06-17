@@ -1,0 +1,208 @@
+--drop PROCEDURE SBO_SP_TransactionNotification
+--Mejora en el manejo 
+--aun hay oporunidad de mejora
+--Activo en produccion de HN y GT a partir del 17/06/2025 a las 8:41
+--Freddy Molina
+
+
+CREATE PROCEDURE SBO_SP_TransactionNotification
+(
+    IN object_type NVARCHAR(30),
+    IN transaction_type NCHAR(1),
+    IN num_of_cols_in_key INT,
+    IN list_of_key_cols_tab_del NVARCHAR(255),
+    IN list_of_cols_val_tab_del NVARCHAR(255)
+)
+LANGUAGE SQLSCRIPT
+AS
+BEGIN
+
+    -- Declaración de variables locales
+    DECLARE error INTEGER DEFAULT 0;
+    DECLARE error_message NVARCHAR(200) DEFAULT N'Ok';
+
+    IF 1 = 1 THEN
+        BEGIN
+            DECLARE LOCALCURR NVARCHAR(3);
+            SELECT "MainCurncy" INTO LOCALCURR FROM OADM;
+
+            -- Validación: Factura sin entrega
+            IF :object_type = '13' AND :transaction_type = 'A' THEN
+                BEGIN
+                    DECLARE GEN INTEGER;
+                    SELECT COUNT(T0."ItemCode") INTO GEN
+                    FROM INV1 T0
+                    INNER JOIN OINV T1 ON T1."DocEntry" = T0."DocEntry"
+                    INNER JOIN OITM T2 ON T0."ItemCode" = T2."ItemCode"
+                    WHERE T0."BaseType" != 15
+                        AND T1."DocType" = 'I'
+                        AND T2."InvntItem" = 'Y'
+                        AND T1."isIns" = 'N'
+                        AND T0."DocEntry" = :list_of_cols_val_tab_del;
+
+                    IF :GEN > 0 THEN
+                        error := 1;
+                        error_message := N'Factura sin Entrega';
+                    END IF;
+                END;
+            END IF;
+
+            -- Validación: No se puede vender códigos Genéricos en factura cliente
+            IF :object_type = '13' AND :transaction_type = 'A' THEN
+                BEGIN
+                    DECLARE GENV INTEGER;
+                    SELECT COUNT(T0."CardCode") INTO GENV
+                    FROM OINV T0
+                    INNER JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+                    INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                    WHERE T2."U_Facturable" = 'No'
+                        AND T0."DocEntry" = :list_of_cols_val_tab_del;
+
+                    IF :GENV > 0 THEN
+                        error := 9;
+                        SELECT N'El código Genérico no se puede vender, Línea ' ||
+                            (SELECT TOP 1 CAST((T1."LineNum" +1) AS VARCHAR) || ' Referencia: ' || T1."ItemCode"
+                             FROM OINV T0
+                             INNER JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+                             INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                             WHERE T0."DocEntry" = :list_of_cols_val_tab_del
+                             AND T2."U_Facturable" = 'No')
+                        INTO error_message FROM DUMMY;
+                    END IF;
+                END;
+            END IF;
+
+            -- Validación: No se puede crear factura proveedor con códigos Genéricos
+            IF :object_type = '18' AND :transaction_type = 'A' THEN
+                BEGIN
+                    DECLARE GENV2 INTEGER;
+                    SELECT COUNT(T0."CardCode") INTO GENV2
+                    FROM OPCH T0
+                    INNER JOIN PCH1 T1 ON T0."DocEntry" = T1."DocEntry"
+                    INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                    WHERE T2."U_Facturable" = 'No'
+                        AND T0."DocEntry" = :list_of_cols_val_tab_del;
+
+                    IF :GENV2 > 0 THEN
+                        error := 9;
+                        SELECT N'El código Genérico no se puede usar en Factura, Línea ' ||
+                            (SELECT TOP 1 CAST((T1."LineNum" +1) AS VARCHAR) || ' Referencia: ' || T1."ItemCode"
+                             FROM OPCH T0
+                             INNER JOIN PCH1 T1 ON T0."DocEntry" = T1."DocEntry"
+                             INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                             WHERE T0."DocEntry" = :list_of_cols_val_tab_del
+                             AND T2."U_Facturable" = 'No')
+                        INTO error_message FROM DUMMY;
+                    END IF;
+                END;
+            END IF;
+
+            -- Validación margen menor al 10% en moneda local
+            IF :object_type = '13' AND :transaction_type = 'A' THEN
+                BEGIN
+                    DECLARE BAJCOS INTEGER;
+                    SELECT COUNT(*) INTO BAJCOS
+                    FROM OINV T0
+                    INNER JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+                    INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                    WHERE T0."DocEntry" = :list_of_cols_val_tab_del
+                        AND "DocType" = 'I'
+                        AND T1."TreeType" != 'I'
+                        AND (T1."Price" <= ((T2."AvgPrice" * 10) / 100) + T2."AvgPrice")
+                        AND T0."U_BajoCosto" = '-'
+                        AND T1."Currency" = LOCALCURR;
+
+                    IF :BAJCOS > 0 THEN
+                        error := 1;
+                        SELECT N'Artículo está por debajo del Precio Permitido. Línea ' ||
+                            (SELECT TOP 1 CAST((T1."LineNum" +1) AS VARCHAR) || ' Referencia: ' || T1."ItemCode"
+                             FROM OINV T0
+                             INNER JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+                             INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                             WHERE T0."DocEntry" = :list_of_cols_val_tab_del
+                             AND "DocType" = 'I'
+                             AND T1."TreeType" != 'I'
+                             AND (T1."Price" <= ((T2."AvgPrice" * 10) / 100) + T2."AvgPrice")
+                             AND T0."U_BajoCosto" = '-'
+                             AND T1."Currency" = LOCALCURR)
+                        INTO error_message FROM DUMMY;
+                    END IF;
+                END;
+            END IF;
+
+            -- Validación margen menor al 10% en USD
+            IF :object_type = '13' AND :transaction_type = 'A' THEN
+                BEGIN
+                    DECLARE BAJCOSDOL INTEGER;
+                    SELECT COUNT(*) INTO BAJCOSDOL
+                    FROM OINV T0
+                    INNER JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+                    INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                    CROSS JOIN ORTT T3
+                    WHERE T0."DocEntry" = :list_of_cols_val_tab_del
+                        AND "DocType" = 'I'
+                        AND T1."TreeType" != 'I'
+                        AND (T1."Price" * T3."Rate" <= ((T2."AvgPrice" * 10) / 100) + T2."AvgPrice")
+                        AND T0."U_BajoCosto" = '-'
+                        AND T1."Currency" = 'USD'
+                        AND T3."RateDate" = CURRENT_DATE;
+
+                    IF :BAJCOSDOL > 0 THEN
+                        error := 1;
+                        SELECT N'Artículo en USD está por debajo del Precio Permitido. Línea ' ||
+                            (SELECT TOP 1 CAST((T1."LineNum" +1) AS VARCHAR) || ' Referencia: ' || T1."ItemCode"
+                             FROM OINV T0
+                             INNER JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+                             INNER JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+                             CROSS JOIN ORTT T3
+                             WHERE T0."DocEntry" = :list_of_cols_val_tab_del
+                             AND "DocType" = 'I'
+                             AND T1."TreeType" != 'I'
+                             AND (T1."Price" * T3."Rate" <= ((T2."AvgPrice" * 10) / 100) + T2."AvgPrice")
+                             AND T0."U_BajoCosto" = '-'
+                             AND T1."Currency" = 'USD'
+                             AND T3."RateDate" = CURRENT_DATE)
+                        INTO error_message FROM DUMMY;
+                    END IF;
+                END;
+            END IF;
+
+            -- Validación: No se puede crear oferta de venta sin referencia
+            IF :object_type = '23' AND :transaction_type = 'A' THEN
+                BEGIN
+                    DECLARE REF INTEGER;
+                    SELECT COUNT(*) INTO REF
+                    FROM OQUT T1
+                    WHERE IFNULL(T1."NumAtCard", '') = ''
+                        AND T1."DocEntry" = :list_of_cols_val_tab_del;
+
+                    IF :REF > 0 THEN
+                        error := 23;
+                        error_message := N'Debe anotar alguna REFERENCIA A LA OFERTA DE VENTA';
+                    END IF;
+                END;
+            END IF;
+
+            -- Validación: No se puede crear orden de venta sin referencia
+            IF :object_type = '17' AND :transaction_type = 'U' THEN
+                BEGIN
+                    DECLARE REF INTEGER;
+                    SELECT COUNT(*) INTO REF
+                    FROM ORDR T1
+                    WHERE IFNULL(T1."NumAtCard", '') = ''
+                        AND T1."DocEntry" = :list_of_cols_val_tab_del;
+
+                    IF :REF > 0 THEN
+                        error := 23;
+                        error_message := N'Debe anotar alguna REFERENCIA A LA ORDEN DE VENTA';
+                    END IF;
+                END;
+            END IF;
+
+        END;
+    END IF;
+
+    -- Retorno final
+    SELECT :error AS "Error", :error_message AS "ErrorMessage" FROM DUMMY;
+
+END;
