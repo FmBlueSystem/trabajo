@@ -1,0 +1,58 @@
+--Sbo Hn
+
+CREATE PROCEDURE SBO_SP_TransactionNotification 
+(
+  in object_type nvarchar(30),
+  in transaction_type nchar(1),
+  in num_of_cols_in_key int,
+  in list_of_key_cols_tab_del nvarchar(255),
+  in list_of_cols_val_tab_del nvarchar(255)
+)
+LANGUAGE SQLSCRIPT
+AS
+BEGIN
+  DECLARE error INT DEFAULT 0;
+  DECLARE error_message NVARCHAR(200) DEFAULT N'Ok';
+
+  -- Validación factura con margen menor al 10% en moneda local
+  IF object_type = '13' AND transaction_type = 'A' THEN
+    DECLARE LOCALCURR NVARCHAR(3);
+    DECLARE BAJCOS INT;
+
+    SELECT "MainCurncy" INTO LOCALCURR FROM OADM;
+
+    SELECT COUNT(*) INTO BAJCOS
+    FROM OINV T0
+    JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+    JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+    WHERE T0."DocEntry" = list_of_cols_val_tab_del
+      AND T0."DocType" = 'I'
+      AND T1."TreeType" != 'I'
+      AND T1."Price" <= (T2."AvgPrice" * 1.10)
+      AND T0."U_BajoCosto" = '-'
+      AND T1."Currency" = LOCALCURR;
+
+    IF BAJCOS > 0 THEN
+      SELECT 1 INTO error FROM DUMMY;
+      SELECT 'Artículo ' || T1."ItemCode" ||
+             ' en línea ' || CAST(T1."LineNum" + 1 AS NVARCHAR) ||
+             ' con precio ' || CAST(T1."Price" AS NVARCHAR) ||
+             ' y costo promedio ' || CAST(T2."AvgPrice" AS NVARCHAR) ||
+             '. Solicite autorización de costo.'
+      INTO error_message
+      FROM OINV T0
+      JOIN INV1 T1 ON T0."DocEntry" = T1."DocEntry"
+      JOIN OITM T2 ON T1."ItemCode" = T2."ItemCode"
+      WHERE T0."DocEntry" = list_of_cols_val_tab_del
+        AND T0."DocType" = 'I'
+        AND T1."TreeType" != 'I'
+        AND T1."Price" <= (T2."AvgPrice" * 1.10)
+        AND T0."U_BajoCosto" = '-'
+        AND T1."Currency" = LOCALCURR
+      LIMIT 1;
+    END IF;
+  END IF;
+
+  -- Resultado final
+  SELECT :error, :error_message FROM DUMMY;
+END;
